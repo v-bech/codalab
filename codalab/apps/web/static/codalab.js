@@ -84,11 +84,14 @@ var BundleRenderer = (function() {
         this.template = element;
     }
     BundleRenderer.loadContentAsync = function(container, parent) {
+        console.log('loadContentAsync');
         $.ajax({
             type: 'GET',
             url: [parent.getUrl(), parent.getFullName()].join('/'),
             cache: false,
             success: function(data) {
+                console.log(data);
+                console.log('');
                 var children = [];
                 if (Array.isArray(data) && data.length == 2) {
                     var set1 = data[0].map(function(item) {
@@ -110,11 +113,14 @@ var BundleRenderer = (function() {
     };
 
     BundleRenderer.loadFileContentAsync = function(container, node) {
+        console.log('loadFileContentAsync');
         $.ajax({
             type: 'GET',
             url: [node.getUrl().replace('api/bundles/content', 'api/bundles/filecontent'), node.getFullName()].join('/'),
             cache: false,
             success: function(data) {
+                console.log(data);
+                console.log('');
                 node.setData(data);
                 BundleRenderer.renderTable(container, BundleRenderer.getContentTableModel(node, container));
             },
@@ -125,7 +131,7 @@ var BundleRenderer = (function() {
 
     BundleRenderer.getContentTableModel = function(node, container) {
         var numRows = 0;
-        if (node.isRootNode() == false) {
+        if (node.isRootNode() === false) {
             numRows += 1;
         }
         if (node.isLeafNode()) {
@@ -282,9 +288,13 @@ var BundleRenderer = (function() {
     BundleRenderer.getMetadataTableModel = function(data) {
         var rows = [];
         for (var k in data.metadata) {
-            if (k !== 'name') {
+            console.log(k);
+            if(k == "description"){
                 rows.push([k, data.metadata[k]]);
             }
+            // if (k !== 'name') {
+            //     rows.push([k, data.metadata[k]]);
+            // }
         }
 
         var renderKey = function(element, row, col) {
@@ -355,8 +365,14 @@ var BundleRenderer = (function() {
         clone.find('.bundle-uuid').text(data.uuid);
         clone.find('.bundle-link').attr('href', '/bundles/' + data.uuid);
         clone.find('.bundle-download').on('click', function(e) {
-            alert('This will allow you to download the bundle');
+            // alert('This will allow you to download the bundle TODO');
             e.preventDefault();
+            console.log(e);
+            console.log(container.get(0));
+            root = new BundleContentNode('/api/bundles/content', data.uuid);
+            console.log(root);
+
+
         });
         var metaContainer = clone.find('.bundle-meta-view-container').get(0);
         BundleRenderer.renderTable(metaContainer, BundleRenderer.getMetadataTableModel(data));
@@ -473,15 +489,12 @@ var WorksheetRenderer = (function() {
         if (data && data.items && Array.isArray(data.items)) {
             var _this = this;
             var title = data.name;
-            if (data.items.length > 0) {
-                var item = data.items[0];
-                if ((item[0] === null) && (item[1].indexOf('#') == 0)) {
-                    title = markdown.toHTML(item[1]).replace(/^<h1>/, '').replace(/<\/h1>$/, '');
-                    data.items = data.items.slice(1);
-                }
+            var title_items = data.items.filter(function(item) { return item[2] === 'title' });
+            if (title_items.length > 0) {
+                title = markdown.toHTML('#' + title_items[0][1]).replace(/^<h1>/, '').replace(/<\/h1>$/, '');
             }
             $('.worksheet-icon').html(title);
-            $('.worksheet-author').html('by codalab');
+            $('.worksheet-author').html('by ' + data.owner);
             var directiveRenderer = new WorkshhetDirectiveRenderer();
             var markdownBlock = '';
             // Add an EOF block to ensure the block transitions always apply within the loop
@@ -497,17 +510,17 @@ var WorksheetRenderer = (function() {
                     element.appendChild(e);
                     markdownBlock = '';
                 }
-
                 switch (item[2]) {
                     case 'markup': {
                         markdownBlock += item[1] + '\n\r';
                         break;
                     }
                     case 'bundle': {
+
                         // Only display bundle if its not empty, this allows ability to hide bundles.
-                        if (item[1]) {
+                        // if (item[1]) {
                             element.appendChild(_this.renderer.render(item[0]));
-                        }
+                        // }
                         break;
                     }
                     case 'directive': {
@@ -547,6 +560,8 @@ var Competition;
     };
 
     function decorateLeaderboardButton(btn, submitted) {
+        //var force_submission_to_leaderboard = btn.attr('force_submission_to_leaderboard');
+
         if (submitted) {
             btn.removeClass('leaderBoardSubmit');
             btn.addClass('leaderBoardRemove');
@@ -560,9 +575,11 @@ var Competition;
 
     function updateLeaderboard(competition, submission, cstoken, btn) {
         var url = '/api/competition/' + competition + '/submission/' + submission + '/leaderboard';
-        var op = 'delete';
+        var op = '';
         if (btn.hasClass('leaderBoardSubmit')) {
             op = 'post';
+        } else if (btn.hasClass('leaderBoardRemove')) {
+            op = 'delete';
         }
         request = $.ajax({
             url: url,
@@ -809,7 +826,19 @@ var Competition;
         $(elemTr).addClass(Competition.oddOrEven(response.submission_number));
         $(elemTr).children().each(function(index) {
             switch (index) {
-                case 0: if (response.status === 'finished') { $(this).val('1'); } break;
+                case 0:
+                    if (response.status === 'finished') {
+                        $(this).val('1');
+
+                        // Add the check box if auto submitted to leaderboard
+                        if($("#forced_to_leaderboard").length > 0) {
+                            // Remove previous checkmarks
+                            $(".fi-check").remove();
+
+                            $($(elemTr).children("td")[4]).html('<i class="fi-check"></i>');
+                        }
+                    }
+                    break;
                 case 1: $(this).html(response.submission_number.toString()); break;
                 case 2: $(this).html(response.filename); break;
                 case 3:
@@ -821,7 +850,7 @@ var Competition;
                         return s;
                     };
                     var dt = new Date(response.submitted_at);
-                    var d = $.datepicker.formatDate('mm/dd/yy', dt).toString();
+                    var d = dt.getDate().toString() + "/" + dt.getMonth().toString() + "/" + dt.getFullYear();
                     var h = dt.getHours().toString();
                     var m = fmt(dt.getMinutes());
                     var s = fmt(dt.getSeconds());
@@ -887,6 +916,7 @@ var Competition;
                 if (status === 'Submitting' || status === 'Submitted' || status === 'Running') {
                     btn.removeClass('hide');
                     btn.text('Refresh status');
+                    console.log('----> ' + nTr.id);
                     btn.on('click', function() {
                         Competition.updateSubmissionStatus($('#competitionId').val(), nTr.id, this);
                     });
@@ -912,9 +942,21 @@ var Competition;
                     $('#user_results #' + submissionId + 'input:hidden').val('1');
                     var phasestate = $('#phasestate').val();
                     if (phasestate == 1) {
-                        $(obj).addClass('leaderBoardSubmit');
-                        $(obj).text('Submit to Leaderboard');
-                        $(obj).on('click', function() {
+                        if($("#forced_to_leaderboard").length == 0) {
+                            $(obj).addClass('leaderBoardSubmit');
+                            $(obj).text('Submit to Leaderboard');
+                        } else {
+                            // Remove all checkmarks
+                            $(".fi-check").remove();
+                            // Get the 4th table item and put a checkmark there
+                            $($("#" + submissionId + " td")[4]).html('<i class="fi-check"></i>');
+
+                            $(obj).removeClass('leaderBoardSubmit');
+                            $(obj).addClass('leaderBoardRemove');
+                            $(obj).text('Remove from Leaderboard');
+                        }
+
+                        $(obj).unbind( "click" ).off('click').on('click', function() {
                             updateLeaderboard(competitionId, submissionId, $('#cstoken').val(), $(obj));
                         });
                     } else {
@@ -1007,6 +1049,10 @@ var Competition;
                             $(competition_actions).children('#competition-unpublish-button').show();
                         },
                         error: function(jsXHR, textStatus, errorThrown) {
+                            var data = $.parseJSON(jsXHR.responseJSON);
+                            if(data.error) {
+                                alert(data.error);
+                            }
                             console.log('Error publishing competition!');
                         }
                     });
@@ -1169,8 +1215,8 @@ var CodaLab;
                     }
 
                     var filetype = file.type;
-                    if (filetype === "") {
-                        var parts = file.name.split(".");
+                    if (filetype === '') {
+                        var parts = file.name.split('.');
                         if (parts.length > 1) {
                             filetype = _this.options.extensionToFileType[parts.pop().toLowerCase()];
                         }
@@ -1442,6 +1488,10 @@ angular
                 templateUrl: '/static/app/partials/worksheet.html',
                 controller: 'worksheet'
             })
+            .when('/my', {
+                templateUrl: '/static/app/partials/myworksheets.html',
+                controller: 'worksheets'
+            })
             .otherwise({
                 templateUrl: '/static/app/partials/worksheets.html',
                 controller: 'worksheets'
@@ -1499,7 +1549,7 @@ angular.module('codalab.controllers')
 ﻿'use strict';
 
 angular.module('codalab.controllers')
-    .controller('worksheets', ['$scope', 'worksheetsApi', function($scope, worksheetsApi) {
+    .controller('worksheets', ['$scope', '$location', 'worksheetsApi', function($scope, $location, worksheetsApi) {
         $scope.status = 'loading';
         $scope.selectionIndex = 0;
         $scope.worksheets = [];
@@ -1508,7 +1558,7 @@ angular.module('codalab.controllers')
             var messages = {
                 '': '',
                 'loading': 'Loading worksheets...',
-                'loaderror': 'Couldn\'t retrive worksheets - Try refreshing the page',
+                'loaderror': 'Couldn\'t retrieve worksheets - Try refreshing the page',
                 'empty': 'There are no worksheets.',
                 'saving': 'Saving',
                 'saveerror': 'Couldn\'t save - Try a different name'
@@ -1526,10 +1576,25 @@ angular.module('codalab.controllers')
 
         worksheetsApi.worksheets().then(function(worksheets) {
             $scope.status = 'loaded';
+            if ($location.path().indexOf('/my') === 0) {
+                worksheets = worksheets.filter(function(w) { return w.owner === $scope.user.name; });
+            }
             angular.forEach(worksheets, function(worksheet) {
                 worksheet.url = '/worksheets/' + worksheet.uuid;
                 worksheet.target = '_self';
                 worksheet.editable = false;
+                var items = worksheet.items.filter(function(item) { return item.type == 'title' });
+                if (items.length > 0) {
+                    worksheet.title = items[0].value;
+                } else {
+                    worksheet.title = worksheet.name;
+                }
+                items = worksheet.items.filter(function(item) { return item.type == 'description' });
+                if (items.length > 0) {
+                    items.forEach(function(item) {
+                        worksheet.description = item.value + '\n';
+                    });
+                }
                 $scope.worksheets.push(worksheet);
             });
         }, function() {
@@ -1539,7 +1604,10 @@ angular.module('codalab.controllers')
         $scope.saveWorksheet = function(worksheet) {
             worksheet.status = 'saving';
             worksheetsApi.createWorksheet(worksheet).then(function(createdWorksheet) {
+                worksheet.name = createdWorksheet.name;
+                worksheet.title = createdWorksheet.name;
                 worksheet.uuid = createdWorksheet.uuid;
+                worksheet.owner = createdWorksheet.owner;
                 worksheet.url = '/worksheets/' + worksheet.uuid;
                 worksheet.editable = false;
                 worksheet.target = '_self';
@@ -1557,7 +1625,8 @@ angular.module('codalab.controllers')
             $scope.worksheets.splice($scope.selectionIndex, 0, {
                 'name': '',
                 'editable': true,
-                'url': '#'
+                'url': '#',
+                'owner': $scope.user.name
             });
         };
 

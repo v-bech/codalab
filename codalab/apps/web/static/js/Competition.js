@@ -13,6 +13,8 @@ var Competition;
     };
 
     function decorateLeaderboardButton(btn, submitted) {
+        //var force_submission_to_leaderboard = btn.attr('force_submission_to_leaderboard');
+
         if (submitted) {
             btn.removeClass('leaderBoardSubmit');
             btn.addClass('leaderBoardRemove');
@@ -26,9 +28,11 @@ var Competition;
 
     function updateLeaderboard(competition, submission, cstoken, btn) {
         var url = '/api/competition/' + competition + '/submission/' + submission + '/leaderboard';
-        var op = 'delete';
+        var op = '';
         if (btn.hasClass('leaderBoardSubmit')) {
             op = 'post';
+        } else if (btn.hasClass('leaderBoardRemove')) {
+            op = 'delete';
         }
         request = $.ajax({
             url: url,
@@ -275,7 +279,19 @@ var Competition;
         $(elemTr).addClass(Competition.oddOrEven(response.submission_number));
         $(elemTr).children().each(function(index) {
             switch (index) {
-                case 0: if (response.status === 'finished') { $(this).val('1'); } break;
+                case 0:
+                    if (response.status === 'finished') {
+                        $(this).val('1');
+
+                        // Add the check box if auto submitted to leaderboard
+                        if($("#forced_to_leaderboard").length > 0) {
+                            // Remove previous checkmarks
+                            $(".fi-check").remove();
+
+                            $($(elemTr).children("td")[4]).html('<i class="fi-check"></i>');
+                        }
+                    }
+                    break;
                 case 1: $(this).html(response.submission_number.toString()); break;
                 case 2: $(this).html(response.filename); break;
                 case 3:
@@ -287,7 +303,7 @@ var Competition;
                         return s;
                     };
                     var dt = new Date(response.submitted_at);
-                    var d = $.datepicker.formatDate('mm/dd/yy', dt).toString();
+                    var d = dt.getDate().toString() + "/" + dt.getMonth().toString() + "/" + dt.getFullYear();
                     var h = dt.getHours().toString();
                     var m = fmt(dt.getMinutes());
                     var s = fmt(dt.getSeconds());
@@ -353,6 +369,7 @@ var Competition;
                 if (status === 'Submitting' || status === 'Submitted' || status === 'Running') {
                     btn.removeClass('hide');
                     btn.text('Refresh status');
+                    console.log('----> ' + nTr.id);
                     btn.on('click', function() {
                         Competition.updateSubmissionStatus($('#competitionId').val(), nTr.id, this);
                     });
@@ -378,9 +395,21 @@ var Competition;
                     $('#user_results #' + submissionId + 'input:hidden').val('1');
                     var phasestate = $('#phasestate').val();
                     if (phasestate == 1) {
-                        $(obj).addClass('leaderBoardSubmit');
-                        $(obj).text('Submit to Leaderboard');
-                        $(obj).on('click', function() {
+                        if($("#forced_to_leaderboard").length == 0) {
+                            $(obj).addClass('leaderBoardSubmit');
+                            $(obj).text('Submit to Leaderboard');
+                        } else {
+                            // Remove all checkmarks
+                            $(".fi-check").remove();
+                            // Get the 4th table item and put a checkmark there
+                            $($("#" + submissionId + " td")[4]).html('<i class="fi-check"></i>');
+
+                            $(obj).removeClass('leaderBoardSubmit');
+                            $(obj).addClass('leaderBoardRemove');
+                            $(obj).text('Remove from Leaderboard');
+                        }
+
+                        $(obj).unbind( "click" ).off('click').on('click', function() {
                             updateLeaderboard(competitionId, submissionId, $('#cstoken').val(), $(obj));
                         });
                     } else {
@@ -473,6 +502,10 @@ var Competition;
                             $(competition_actions).children('#competition-unpublish-button').show();
                         },
                         error: function(jsXHR, textStatus, errorThrown) {
+                            var data = $.parseJSON(jsXHR.responseJSON);
+                            if(data.error) {
+                                alert(data.error);
+                            }
                             console.log('Error publishing competition!');
                         }
                     });

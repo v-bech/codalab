@@ -10,6 +10,8 @@ import tempfile
 import datetime
 import django.dispatch
 import time
+import string
+import uuid
 from django.db import models
 from django.db import IntegrityError
 from django.db.models import Max
@@ -29,6 +31,7 @@ from django.contrib.contenttypes import generic
 from mptt.models import MPTTModel, TreeForeignKey
 from pytz import utc
 from guardian.shortcuts import assign_perm
+from django_extensions.db.fields import UUIDField
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +151,10 @@ class Competition(models.Model):
     last_modified = models.DateTimeField(auto_now_add=True)
     pagecontainers = generic.GenericRelation(PageContainer)
     published = models.BooleanField(default=False, verbose_name="Publicly Available")
+    # Let's assume the first phase never needs "migration"
+    last_phase_migration = models.PositiveIntegerField(default=1)
+    is_migrating = models.BooleanField(default=False)
+    force_submission_to_leaderboard = models.BooleanField(default=False)
 
     @property
     def pagecontent(self):
@@ -190,6 +197,89 @@ class Competition(models.Model):
             return True if self.end_date is None else self.end_date > now().date()
         if type(self.end_date) is datetime.datetime:
             return True if self.end_date is None else self.end_date > now()
+
+    def do_phase_migration(self, current_phase, last_phase):
+        '''
+        Does the actual migrating of submissions from last_phase to current_phase
+
+        current_phase: The new phase object we are entering
+        last_phase: The phase object to transfer submissions from
+        '''
+        logger.info('Doing phase migration on competition pk=%s from phase: %s to phase: %s' %
+                    (self.pk, last_phase.phasenumber, current_phase.phasenumber))
+
+        if self.is_migrating:
+            logger.info('Trying to migrate competition pk=%s, but it is already being migrated!' % self.pk)
+            return
+
+        self.is_migrating = True
+        self.save()
+
+        try:
+            submissions = []
+            leader_board = PhaseLeaderBoard.objects.get(phase=last_phase)
+
+            leader_board_entries = PhaseLeaderBoardEntry.objects.filter(board=leader_board)
+            for submission in leader_board_entries:
+                submissions.append(submission.result)
+
+            participants = {}
+
+            for s in submissions:
+                participants[s.participant] = s
+
+            from tasks import evaluate_submission
+
+            for participant, submission in participants.items():
+                logger.info('Moving submission %s over' % submission)
+
+                new_submission = CompetitionSubmission.objects.create(
+                    participant=participant,
+                    file=submission.file,
+                    phase=current_phase
+                )
+
+                evaluate_submission(new_submission.pk, current_phase.is_scoring_only)
+        except PhaseLeaderBoard.DoesNotExist:
+            pass
+
+        current_phase.is_migrated = True
+        current_phase.save()
+
+        # TODO: ONLY IF SUCCESSFUL
+        self.is_migrating = False # this should really be True until evaluate_submission tasks are all the way completed
+        self.last_phase_migration = current_phase.phasenumber
+        self.save()
+
+    def check_trailing_phase_submissions(self):
+        '''
+        Checks that the requested competition has all submissions in the current phase, none trailing in the previous
+        phase
+        '''
+        if self.is_migrating:
+            logger.info('Trying to check migrations on competition pk=%s, but it is already being migrated!' % self.pk)
+            return
+
+        last_phase = None
+        current_phase = None
+
+        for phase in self.phases.all():
+            if phase.is_active:
+                current_phase = phase
+                break
+
+            last_phase = phase
+
+        if current_phase is None or last_phase is None:
+            return
+
+        logger.info("Checking for needed migrations on competition pk=%s, last phase: %s, current phase: %s" %
+                    (self.pk, last_phase.phasenumber, current_phase.phasenumber))
+
+        if current_phase.phasenumber > self.last_phase_migration:
+            if current_phase.auto_migration:
+                self.do_phase_migration(current_phase, last_phase)
+
 
 class Page(models.Model):
     category = TreeForeignKey(ContentCategory)
@@ -261,8 +351,15 @@ def phase_input_data_file(phase, filename="input.zip"):
     return os.path.join(phase_data_prefix(phase), filename)
 
 def submission_root(instance):
-    return os.path.join("competition", str(instance.phase.competition.pk), str(instance.phase.pk),
-                        "submissions", str(instance.participant.user.pk), str(instance.submission_number))
+    # will generate /competition/1/1/submissions/1/1/
+    return os.path.join(
+        "competition",
+        str(instance.phase.competition.pk),
+        str(instance.phase.pk),
+        "submissions",
+        str(instance.participant.user.pk),
+        str(instance.submission_number)
+    )
 
 def submission_file_name(instance, filename="predictions.zip"):
     return os.path.join(submission_root(instance), filename)
@@ -270,10 +367,16 @@ def submission_file_name(instance, filename="predictions.zip"):
 def submission_inputfile_name(instance, filename="input.txt"):
     return os.path.join(submission_root(instance), filename)
 
+def submission_history_file_name(instance, filename="history.txt"):
+    return os.path.join(submission_root(instance), filename)
+
 def submission_runfile_name(instance, filename="run.txt"):
     return os.path.join(submission_root(instance), filename)
 
 def submission_output_filename(instance, filename="output.zip"):
+    return os.path.join(submission_root(instance), "run", filename)
+
+def submission_private_output_filename(instance, filename="private_output.zip"):
     return os.path.join(submission_root(instance), "run", filename)
 
 def submission_stdout_filename(instance, filename="stdout.txt"):
@@ -319,7 +422,17 @@ class CompetitionPhase(models.Model):
     """
         A phase of a competition.
     """
+    COLOR_CHOICES = (
+        ('white', 'White'),
+        ('orange', 'Orange'),
+        ('yellow', 'Yellow'),
+        ('green', 'Green'),
+        ('blue', 'Blue'),
+        ('purple', 'Purple'),
+    )
+
     competition = models.ForeignKey(Competition,related_name='phases')
+    # Is this 0 based or 1 based?
     phasenumber = models.PositiveIntegerField(verbose_name="Number")
     label = models.CharField(max_length=50, blank=True, verbose_name="Name")
     start_date = models.DateTimeField(verbose_name="Start Date (UTC)")
@@ -330,6 +443,14 @@ class CompetitionPhase(models.Model):
     input_data = models.FileField(upload_to=phase_input_data_file, storage=BundleStorage,null=True,blank=True, verbose_name="Input Data")
     datasets = models.ManyToManyField(Dataset, blank=True, related_name='phase')
     leaderboard_management_mode = models.CharField(max_length=50, default=LeaderboardManagementMode.DEFAULT, verbose_name="Leaderboard Mode")
+    auto_migration = models.BooleanField(default=False)
+    is_migrated = models.BooleanField(default=False)
+    execution_time_limit = models.PositiveIntegerField(default=(5 * 60))
+    color = models.CharField(max_length=24, choices=COLOR_CHOICES, blank=True, null=True)
+
+    input_data_organizer_dataset = models.ForeignKey('OrganizerDataSet', null=True, blank=True, related_name="input_data_organizer_dataset", verbose_name="Input Data", on_delete=models.SET_NULL)
+    reference_data_organizer_dataset = models.ForeignKey('OrganizerDataSet', null=True, blank=True, related_name="reference_data_organizer_dataset", verbose_name="Reference Data", on_delete=models.SET_NULL)
+    scoring_program_organizer_dataset = models.ForeignKey('OrganizerDataSet', null=True, blank=True, related_name="scoring_program_organizer_dataset", verbose_name="Scoring Program", on_delete=models.SET_NULL)
 
     class Meta:
         ordering = ['phasenumber']
@@ -614,8 +735,10 @@ class CompetitionSubmission(models.Model):
     status_details = models.CharField(max_length=100, null=True, blank=True)
     submission_number = models.PositiveIntegerField(default=0)
     output_file = models.FileField(upload_to=submission_output_filename, storage=BundleStorage, null=True, blank=True)
+    private_output_file = models.FileField(upload_to=submission_private_output_filename, storage=BundleStorage, null=True, blank=True)
     stdout_file = models.FileField(upload_to=submission_stdout_filename, storage=BundleStorage, null=True, blank=True)
     stderr_file = models.FileField(upload_to=submission_stderr_filename, storage=BundleStorage, null=True, blank=True)
+    history_file = models.FileField(upload_to=submission_history_file_name, storage=BundleStorage, null=True, blank=True)
     prediction_runfile = models.FileField(upload_to=submission_prediction_runfile_name,
                                           storage=BundleStorage, null=True, blank=True)
     prediction_output_file = models.FileField(upload_to=submission_prediction_output_filename,
@@ -648,7 +771,7 @@ class CompetitionSubmission(models.Model):
             else:
                 print "Submission number below maximum."
 
-            self.status = CompetitionSubmissionStatus.objects.get(codename=CompetitionSubmissionStatus.SUBMITTING)
+            self.status = CompetitionSubmissionStatus.objects.get_or_create(codename=CompetitionSubmissionStatus.SUBMITTING)[0]
 
         print "Setting the file url base."
         self.file_url_base = self.file.storage.url('')
@@ -676,7 +799,7 @@ class CompetitionSubmission(models.Model):
         Returns the FileField object for the file that is to be downloaded by the given user.
 
         key: A name identifying the file to download. The choices are 'input.zip', 'output.zip',
-           'prediction-output.zip', 'stdout.txt' or 'stderr.txt'.
+           'prediction-output.zip', 'stdout.txt', 'stderr.txt', 'history.txt' or 'private_output.zip'
         requested_by: A user object identifying the user making the request to access the file.
 
         Raises:
@@ -686,13 +809,15 @@ class CompetitionSubmission(models.Model):
         downloadable_files = {
             'input.zip': ('file', 'zip', False),
             'output.zip': ('output_file', 'zip', True),
+            'private_output.zip': ('private_output_file', 'zip', True),
             'prediction-output.zip': ('prediction_output_file', 'zip', True),
             'stdout.txt': ('stdout_file', 'txt', True),
-            'stderr.txt': ('stderr_file', 'txt', False)
+            'stderr.txt': ('stderr_file', 'txt', False),
         }
         if key not in downloadable_files:
             raise ValueError("File requested is not valid.")
         file_attr, file_ext, file_has_restricted_access = downloadable_files[key]
+
         # If the user requesting access is the owner, access granted
         if self.participant.competition.creator.id != requested_by.id:
             # User making request must be owner of this submission and be granted
@@ -701,8 +826,14 @@ class CompetitionSubmission(models.Model):
                 raise PermissionDenied()
             if file_has_restricted_access and self.phase.is_blind:
                 raise PermissionDenied()
+
+        if key == 'private_output.zip':
+            if self.participant.competition.creator.id != requested_by.id:
+                raise PermissionDenied()
+
         file_type = 'text/plain' if file_ext == 'txt' else 'application/zip'
         file_name = "{0}-{1}-{2}".format(self.participant.user.username, self.submission_number, key)
+
         return getattr(self, file_attr), file_type, file_name
 
 class SubmissionResultGroup(models.Model):
@@ -758,7 +889,7 @@ class CompetitionDefBundle(models.Model):
         if type(dt) is str:
             dt = parse_datetime(dt)
         if type(dt) is datetime.date:
-            dt = datetime.datetime.combine(dt, datetime.time())            
+            dt = datetime.datetime.combine(dt, datetime.time())
         if not type(dt) is datetime.datetime:
             raise ValueError("Expected a DateTime object but got %s" % dt)
         if dt.tzinfo is None:
@@ -791,7 +922,7 @@ class CompetitionDefBundle(models.Model):
                 del comp_base['end_date']
             else:
                 comp_base['end_date'] = CompetitionDefBundle.localize_datetime(comp_base['end_date'])
-        
+
         comp = Competition(**comp_base)
         comp.save()
         logger.debug("CompetitionDefBundle::unpack created base competition (pk=%s)", self.pk)
@@ -804,6 +935,7 @@ class CompetitionDefBundle(models.Model):
 
         # Populate competition pages
         pc,_ = PageContainer.objects.get_or_create(object_id=comp.id, content_type=ContentType.objects.get_for_model(comp))
+
         details_category = ContentCategory.objects.get(name="Learn the Details")
         Page.objects.create(category=details_category, container=pc,  codename="overview", competition=comp,
                                    label="Overview", rank=0, html=zf.read(comp_spec['html']['overview']))
@@ -811,14 +943,30 @@ class CompetitionDefBundle(models.Model):
                                    label="Evaluation", rank=1, html=zf.read(comp_spec['html']['evaluation']))
         Page.objects.create(category=details_category, container=pc,  codename="terms_and_conditions", competition=comp,
                                    label="Terms and Conditions", rank=2, html=zf.read(comp_spec['html']['terms']))
+
+        default_pages = ('overview', 'evaluation', 'terms', 'data')
+
+        for page_name, page_data in comp_spec['html'].items():
+            if page_name not in default_pages:
+                Page.objects.create(
+                    category=details_category,
+                    container=pc,
+                    codename=page_name,
+                    competition=comp,
+                    label=page_name,
+                    rank=2,
+                    html=zf.read(page_data)
+                )
+
         participate_category = ContentCategory.objects.get(name="Participate")
         Page.objects.create(category=participate_category, container=pc,  codename="get_data", competition=comp,
                                    label="Get Data", rank=0, html=zf.read(comp_spec['html']['data']))
         Page.objects.create(category=participate_category, container=pc,  codename="submit_results", label="Submit / View Results", rank=1, html="")
+
         logger.debug("CompetitionDefBundle::unpack created competition pages (pk=%s)", self.pk)
 
         # Create phases
-        for p_num in comp_spec['phases']:
+        for index, p_num in enumerate(comp_spec['phases']):
             phase_spec = comp_spec['phases'][p_num].copy()
             phase_spec['competition'] = comp
 
@@ -832,19 +980,61 @@ class CompetitionDefBundle(models.Model):
 
             if 'datasets' in phase_spec:
                 datasets = phase_spec['datasets']
+
+                for dataset_index, dataset in datasets.items():
+                    if "key" in dataset:
+                        dataset["url"] = reverse("datasets_download", kwargs={"dataset_key": dataset["key"]})
+
                 del phase_spec['datasets']
             else:
                 datasets = {}
 
             phase_spec['start_date'] = CompetitionDefBundle.localize_datetime(phase_spec['start_date'])
 
+            # First phase can't have auto_migration=True, remove that here
+            if index == 0:
+                phase_spec['auto_migration'] = False
+                comp.last_phase_migration = phase_spec['phasenumber']
+                logger.debug('Set last_phase_migration to #%s' % phase_spec['phasenumber'])
+                comp.save()
+
             phase, created = CompetitionPhase.objects.get_or_create(**phase_spec)
             logger.debug("CompetitionDefBundle::unpack created phase (pk=%s)", self.pk)
             # Evaluation Program
+
             phase.scoring_program.save(phase_scoring_program_file(phase), File(io.BytesIO(zf.read(phase_spec['scoring_program']))))
             phase.reference_data.save(phase_reference_data_file(phase), File(io.BytesIO(zf.read(phase_spec['reference_data']))))
+            phase.auto_migration = bool(phase_spec.get('auto_migration', False))
+            phase.color = phase_spec.get('color', '').lower().strip()
+
+            if hasattr(phase, 'scoring_program') and phase.scoring_program:
+                if phase_spec["scoring_program"].endswith(".zip"):
+                    phase.scoring_program.save(phase_scoring_program_file(phase), File(io.BytesIO(zf.read(phase_spec['scoring_program']))))
+                else:
+                    logger.debug("CompetitionDefBundle::unpack getting dataset for scoring_program with key %s", phase_spec["scoring_program"])
+                    data_set = OrganizerDataSet.objects.get(key=phase_spec["scoring_program"])
+                    phase.scoring_program = data_set.data_file.file.name
+                    phase.scoring_program_organizer_dataset = data_set
+
+            if hasattr(phase, 'reference_data') and phase.reference_data:
+                if phase_spec["reference_data"].endswith(".zip"):
+                    phase.reference_data.save(phase_reference_data_file(phase), File(io.BytesIO(zf.read(phase_spec['reference_data']))))
+                else:
+                    logger.debug("CompetitionDefBundle::unpack getting dataset for reference_data with key %s", phase_spec["reference_data"])
+                    data_set = OrganizerDataSet.objects.get(key=phase_spec["reference_data"])
+                    phase.reference_data = data_set.data_file.file.name
+                    phase.reference_data_organizer_dataset = data_set
+
             if 'input_data' in phase_spec:
-                phase.input_data.save(phase_input_data_file(phase), File(io.BytesIO(zf.read(phase_spec['input_data']))))
+                if phase_spec["input_data"].endswith(".zip"):
+                    phase.input_data.save(phase_input_data_file(phase), File(io.BytesIO(zf.read(phase_spec['input_data']))))
+                else:
+                    logger.debug("CompetitionDefBundle::unpack getting dataset for input_data with key %s", phase_spec["input_data"])
+                    data_set = OrganizerDataSet.objects.get(key=phase_spec["input_data"])
+                    phase.input_data = data_set.data_file.file.name
+                    phase.input_data_organizer_dataset = data_set
+
+            phase.auto_migration = bool(phase_spec.get('auto_migration', False))
             phase.save()
             logger.debug("CompetitionDefBundle::unpack saved scoring program and reference data (pk=%s)", self.pk)
             eft,cr_=ExternalFileType.objects.get_or_create(name="Data", codename="data")
@@ -903,7 +1093,7 @@ class CompetitionDefBundle(models.Model):
                                     'sorting' : 'desc' if 'sort' not in vals else vals['sort'],
                                     'ordering' : index if 'rank' not in vals else vals['rank']
                                     }
-                    if 'selection_default' in vals: 
+                    if 'selection_default' in vals:
                         sdefaults['selection_default'] = vals['selection_default']
 
                     sd,cr = SubmissionScoreDef.objects.get_or_create(
@@ -1068,12 +1258,47 @@ class PhaseLeaderBoardEntry(models.Model):
     class Meta:
         unique_together = (('board', 'result'),)
 
+
+def dataset_data_file(dataset, filename="data.zip"):
+    return os.path.join("datasets", str(dataset.pk), str(uuid.uuid4()), filename)
+
+
+class OrganizerDataSet(models.Model):
+    TYPES = (
+        ("Reference Data", "Reference Data"),
+        ("Scoring Program", "Scoring Program"),
+        ("Input Data", "Input Data"),
+        ("None", "None")
+    )
+    name = models.CharField(max_length=255)
+    type = models.CharField(max_length=64, choices=TYPES, default="None")
+    description = models.TextField(null=True, blank=True)
+    data_file = models.FileField(
+        upload_to=dataset_data_file,
+        storage=BundleStorage,
+        verbose_name="Data File"
+    )
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL)
+    key = UUIDField(version=4)
+
+    def save(self, **kwargs):
+        if self.key is None or self.key == '':
+            self.key = "%s" % (uuid.uuid4())
+        super(OrganizerDataSet, self).save(**kwargs)
+
+    def __unicode__(self):
+        return "%s uploaded by %s" % (self.name, self.uploaded_by)
+
+
 def add_submission_to_leaderboard(submission):
     """
     Adds the given submission to its leaderboard. It is the caller responsiblity to make
     sure the submission is ready to be added (e.g. it's in the finished state).
     """
-    lb,_ = PhaseLeaderBoard.objects.get_or_create(phase=submission.phase)
+    lb, _ = PhaseLeaderBoard.objects.get_or_create(phase=submission.phase)
+
+    logger.info('Adding submission %s to leaderboard %s' % (submission, lb))
+
     # Currently we only allow one submission into the leaderboard although the leaderboard
     # is setup to accept multiple submissions from the same participant.
     entries = PhaseLeaderBoardEntry.objects.filter(board=lb, result__participant=submission.participant)

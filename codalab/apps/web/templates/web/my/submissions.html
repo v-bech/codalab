@@ -3,7 +3,6 @@
 {% load codalab %}
 {% load tz %}
 
-{% block title %}Submissions{% endblock %}
 {% block page_title %}Submissions{% endblock page_title %}
 {% block head_title %}Submissions{% endblock %}
 
@@ -19,7 +18,7 @@
                 {% else %}
                 <section>
                 {% endif %}
-                    <a class="phaseLabel" href="/my/competition/{{competition.id}}/submissions/?phase={{phase.id}}">{{phase.label}}</a> 
+                    <a class="phaseLabel" href="/my/competition/{{competition.id}}/submissions/?phase={{phase.id}}">{{phase.label}}</a>
                     <br>
                     <span>{{phase.start_date|utc}} UTC</span>
                 </section>
@@ -41,6 +40,7 @@
                     </th>
                     {% endfor %}
                     <th width="40px"></th>
+                    <th width="40px"></th>
                 </tr>
             </thead>
             <tbody>
@@ -54,6 +54,7 @@
                     {% endif %}
                     {% endfor %}
                     <td><i class="fi-plus" onclick="Competition.showOrHideSubmissionDetails(this)"></i></td>
+                    <td><a href="{% url "competitions:submission_delete" pk=submission.id %}">DEL</a></td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -63,6 +64,7 @@
 </div>
 
 {% include "web/common/_submission_details_template.html" %}
+
 {% endblock %}
 
 {% block js %}

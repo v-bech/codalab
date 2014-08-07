@@ -6,21 +6,24 @@
 {% block page_title %}Edit Competition{% endblock page_title %}
 
 {% block extra_headers %}
-      <link rel="stylesheet" href="{{ STATIC_URL }}css/jquery.datetimepicker.css">
+    <link rel="stylesheet" href="{{ STATIC_URL }}css/jquery.datetimepicker.css">
 {% endblock extra_headers %}
+{% block extra_scripts %}
+    <script src="{{ STATIC_URL }}tiny_mce/tiny_mce.js"></script>
+{% endblock extra_scripts %}
 
 {% block content %}
 <div class="row">
   <div class="large-12 columns">
-    <a class="helpLinkIcon right" href="{% url 'help' %}#phases" title="Get help with creating a competition" target="_blank"></a>
+    <a class="helpLinkIcon right" href="https://github.com/codalab/codalab/wiki/User_Competition-Roadmap" title="Get help with creating a competition" target="_blank"></a>
   </div>
 </div>
 
 <div class="row">
   <div id="edit_competition" class="content" data-slug="#overview" data-section-content>
     <form data-abide enctype="multipart/form-data" method="POST">{% csrf_token %}
-		<fieldset>
-		<legend>General Information</legend>
+        <fieldset>
+        <legend>General Information</legend>
         {% for field in form %}
             <div class="fieldWrapper">
                 <div class="row">
@@ -34,50 +37,50 @@
                 </div>
             </div>
         {% endfor %}
-		</fieldset>
+        </fieldset>
 
-		<ul id="pages">
-		{{ Pages.management_form }}
+        <ul id="pages">
+        {{ Pages.management_form }}
         {{ Pages.non_form_errors }}
         <li class="empty-page-form">
-			<fieldset class="page">
-				<legend>Web Page</legend>
-				{% for field in Pages.empty_form %}
-    				<div class="fieldWrapper">
-	    				<div class="row">
-		    				{{ field.errors }}
-            				{% if not field.is_hidden %}
-			        			<div class="large-3 columns">
-					    			<label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
-    					    	</div>
+            <fieldset class="page">
+                <legend>Web Page</legend>
+                {% for field in Pages.empty_form %}
+                    <div class="fieldWrapper">
+                        <div class="row">
+                            {{ field.errors }}
+                            {% if not field.is_hidden %}
+                                <div class="large-3 columns">
+                                    <label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
+                                </div>
                         {% endif %}
-        					<div class="large-9 columns">{{ field }}</div>
-    					</div>
-	    			</div>
-        		{% endfor %}                
-			</fieldset> 
+                            <div class="large-9 columns">{{ field }}</div>
+                        </div>
+                    </div>
+                {% endfor %}
+            </fieldset>
         </li>
-		{% for page in Pages %}
+        {% for page in Pages %}
            <li>
-			<fieldset class="page">
-				<legend>Web Page</legend>
-				{% for field in page %}
+            <fieldset class="page">
+                <legend>Web Page</legend>
+                {% for field in page %}
                         <div class="fieldWrapper">
                             <div class="row">
-	    					{{ field.errors }}
-           					{% if not field.is_hidden %}
+                            {{ field.errors }}
+                            {% if not field.is_hidden %}
                                 <div class="large-3 columns">
-				   					<label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
-    							</div>
+                                    <label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
+                                </div>
                                     {% endif %}
-	    					<div class="large-9 columns">{{ field }}</div>
+                            <div class="large-9 columns">{{ field }}</div>
                                 </div>
                                 </div>
-				{% endfor %}                
-			</fieldset>
+                {% endfor %}
+            </fieldset>
           </li>
-		{% endfor %}
-		</ul>
+        {% endfor %}
+        </ul>
 
         <div class="row">
             <div class="large-12 columns">
@@ -90,48 +93,56 @@
             {{ Phases.non_form_errors }}
             <li class="empty-phase-form">
                  <fieldset class="phase">
-				    <legend>Phase</legend>
-				    {% for field in Phases.empty_form %}
-    				    <div class="fieldWrapper">
-	    				    <div class="row">
-		    				    {{ field.errors }}
-            				    {% if not field.is_hidden %}
-				    			    <div class="large-3 columns">
-									    <label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
-							        </div>
-		        			    {% endif %}
-						        <div class="large-9 columns">{{ field }}</div>
-					        </div>
-				        </div>
-                    {% endfor %}                
-                </fieldset> 
+                    <legend>Phase</legend>
+                    {% for field in Phases.empty_form %}
+                        <div class="fieldWrapper">
+                            <div class="row">
+                                {{ field.errors }}
+                                {% if not field.is_hidden %}
+                                    <div class="large-3 columns">
+                                        <label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
+                                    </div>
+                                {% endif %}
+                                <div class="large-9 columns">{{ field }}</div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </fieldset>
             </li>
             {% for form in Phases %}
                 <li>
-			        <fieldset class="phase">
-				        <legend>Competition Phase</legend>
-				        {% for field in form %}
-    					    <div class="fieldWrapper">
-	    					    <div class="row clearfix">
-		    					    {{ field.errors }}
-				                    {% if not field.is_hidden %}
-							            <div class="large-3 columns">
-								            <label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
-							            </div>
-        				            {% endif %}
-						            <div class="large-9 columns">{{ field }}</div>
-		    			        </div>
-			    	        </div>
-            {% endfor %}
-			        </fieldset> 
+                    <fieldset class="phase">
+                        <legend>Competition Phase</legend>
+                        {% for field in form %}
+                            {% if field.name == "input_data_organizer_dataset" %}
+                                <div class="fieldWrapper" style="padding: 30px 0; text-align: center;">
+                                    <div class="row clearfix">
+                                        You can add, remove, and modify datasets in the <a href="{% url "my_datasets" %}">My Datasets</a> section
+                                    </div>
+                                </div>
+                            {% endif %}
+
+                            <div class="fieldWrapper">
+                                <div class="row clearfix">
+                                    {{ field.errors }}
+                                    {% if not field.is_hidden %}
+                                        <div class="large-3 columns">
+                                            <label for="{{field.id_for_label}}" class="inline">{{field.label}}{{field.label_suffix}}</label>
+                                        </div>
+                                    {% endif %}
+                                    <div class="large-9 columns">{{ field }}</div>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    </fieldset>
                 </li>
-        {% endfor %}
+            {% endfor %}
         </ul>
         <div class="row">
             <div class="large-12 columns">
                 <button type="button" class="medium blue button add-phase right">Add Phase</button>
         </div>
-        </div>  
+        </div>
         <div class="row">
           <div class="large-12 columns">
             <button type="submit" class="medium button blue">Submit</button>
@@ -178,7 +189,7 @@ $('document').ready(function () {
         defaultSelect: false
     });
 
-    // Hide order for everything < 2 
+    // Hide order for everything < 2
     $('#pages').find("[name*=rank]").each(function (index, value) {
         if (value.value <= 2) {
             $(value).parents(".fieldWrapper").hide();
@@ -205,7 +216,7 @@ $('document').ready(function () {
     });
 
     $('.add-page').click(function () {
-        var nextPage = 0;    
+        var nextPage = 0;
         $('#pages').find("[name*=rank]").each(function (index, value) {
             nextPage = Math.max(nextPage, parseInt(value.value) + 1);
         });
@@ -215,20 +226,20 @@ $('document').ready(function () {
         form.elem.find("[name$=container]").val(wlp[wlp.length - 1]);
         var rank = form.elem.find("[name*=rank]");
         rank.parents(".fieldWrapper").show();
-        form.elem.find("textarea").each(function () { 
+        form.elem.find("textarea").each(function () {
             tinyMCE.execCommand('mceAddControl', false, this.id);
-        });        
+        });
         rank.val(nextPage);
         nextPage += 1;
         form.pDelete = form.delete;
         form.delete = function () {
             if (confirm("Are you sure you want to delete this page?")) {
-                this.elem.find("textarea").each(function (idx, val) { 
+                this.elem.find("textarea").each(function (idx, val) {
                     if (tinyMCE.getInstanceById(val.id)) {
-                        tinyMCE.execCommand('mceFocus', false, val.id);                    
+                        tinyMCE.execCommand('mceFocus', false, val.id);
                         tinyMCE.execCommand('mceRemoveControl', false, val.id);
-                    }                
-                }); 
+                    }
+                });
                 this.pDelete();
             }
         };

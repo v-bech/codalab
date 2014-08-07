@@ -12,14 +12,20 @@ from rest_framework.exceptions import PermissionDenied, ParseError
 from rest_framework.response import Response
 
 from django.conf import settings
+from django.contrib.auth.decorators import login_required
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
 from django.core.files.base import ContentFile
+from django.core.mail import send_mail
 from django.http import Http404, StreamingHttpResponse
-from django.contrib.auth.decorators import login_required
 from django.utils.decorators import method_decorator
+from django.core.mail import EmailMultiAlternatives
+from django.template import Context
+from django.template.loader import render_to_string
+from django.contrib.sites.models import Site
 
+from apps.authenz.models import ClUser
 from apps.jobs.models import Job
 from apps.web import models as webmodels
 from apps.web.bundles import BundleService
@@ -141,6 +147,14 @@ class CompetitionAPIViewSet(viewsets.ModelViewSet):
         c = webmodels.Competition.objects.get(id=pk)
         response = {}
         if self.request.user == c.creator:
+            phases_needing_reference_data = webmodels.CompetitionPhase.objects.filter(competition=c, reference_data='').count()
+
+            if phases_needing_reference_data > 0:
+                response = {
+                    "error": "Not all phases have reference data, it is required for each phase before publishing."
+                }
+                return Response(json.dumps(response), status=400, content_type="application/json")
+
             c.published = True
             c.save()
             response['id'] = pk
@@ -165,6 +179,22 @@ class CompetitionAPIViewSet(viewsets.ModelViewSet):
             response['status'] = 403
         return Response(json.dumps(response), content_type="application/json")
 
+    def _send_mail(self, context_data, from_email=None, html_file=None, text_file=None, subject=None, to_email=None):
+        from_email = from_email if from_email else settings.DEFAULT_FROM_EMAIL
+
+        context_data["site"] = Site.objects.get_current()
+
+        print context_data
+        print "site in there"
+
+        context = Context(context_data)
+        text = render_to_string(text_file, context)
+        html = render_to_string(html_file, context)
+
+        message = EmailMultiAlternatives(subject, text, from_email, [to_email])
+        message.attach_alternative(html, 'text/html')
+        message.send()
+
     @action(permission_classes=[permissions.IsAuthenticated])
     def participate(self, request, pk=None):
         comp = self.get_object()
@@ -184,6 +214,55 @@ class CompetitionAPIViewSet(viewsets.ModelViewSet):
             'result' : 201 if cr else 200,
             'id' : p.id
         }
+
+        status_text = str(status)
+
+        if status_text == webmodels.ParticipantStatus.PENDING:
+            if self.request.user.participation_status_updates:
+                self._send_mail(
+                    {
+                        'competition': comp
+                    },
+                    subject='Application to %s sent' % comp,
+                    html_file="emails/notifications/participation_requested.html",
+                    text_file="emails/notifications/participation_requested.txt",
+                    to_email=self.request.user.email
+                )
+
+            if comp.creator.organizer_status_updates:
+                self._send_mail(
+                    {
+                        'competition': comp,
+                        'participant': p
+                    },
+                    subject='%s applied to your competition' % p.user,
+                    html_file="emails/notifications/organizer_participation_requested.html",
+                    text_file="emails/notifications/organizer_participation_requested.txt",
+                    to_email=comp.creator.email
+                )
+        else:
+            if self.request.user.participation_status_updates:
+                self._send_mail(
+                    {
+                        'competition': comp
+                    },
+                    subject='Accepted into %s!' % comp,
+                    html_file="emails/notifications/participation_accepted.html",
+                    text_file="emails/notifications/participation_accepted.txt",
+                    to_email=self.request.user.email
+                )
+
+            if comp.creator.organizer_status_updates:
+                self._send_mail(
+                    {
+                        'competition': comp,
+                        'participant': p
+                    },
+                    subject='%s accepted into your competition!' % p.user,
+                    html_file="emails/notifications/organizer_participation_accepted.html",
+                    text_file="emails/notifications/organizer_participation_accepted.txt",
+                    to_email=comp.creator.email
+                )
 
         return Response(json.dumps(response_data), content_type="application/json")
 
@@ -211,6 +290,9 @@ class CompetitionAPIViewSet(viewsets.ModelViewSet):
         part = request.DATA['participant_id']
         reason = request.DATA['reason']
 
+        if comp.creator != request.user:
+            raise PermissionDenied()
+
         try:
             p = webmodels.CompetitionParticipant.objects.get(competition=comp, pk=part)
             p.status = webmodels.ParticipantStatus.objects.get(codename=status)
@@ -221,6 +303,56 @@ class CompetitionAPIViewSet(viewsets.ModelViewSet):
                 'participantId': part,
                 'reason': reason
                 }
+
+            if status == webmodels.ParticipantStatus.PENDING:
+                pass
+            elif status == webmodels.ParticipantStatus.APPROVED:
+                if self.request.user.participation_status_updates:
+                    self._send_mail(
+                        {
+                            'competition': comp
+                        },
+                        subject='Accepted into %s!' % comp,
+                        html_file="emails/notifications/participation_accepted.html",
+                        text_file="emails/notifications/participation_accepted.txt",
+                        to_email=self.request.user.email
+                    )
+
+                if comp.creator.organizer_status_updates:
+                    self._send_mail(
+                        {
+                            'competition': comp,
+                            'participant': p
+                        },
+                        subject='%s accepted into your competition!' % p.user,
+                        html_file="emails/notifications/organizer_participation_accepted.html",
+                        text_file="emails/notifications/organizer_participation_accepted.txt",
+                        to_email=comp.creator.email
+                    )
+            elif status == webmodels.ParticipantStatus.DENIED:
+                if self.request.user.participation_status_updates:
+                    self._send_mail(
+                        {
+                            'competition': comp
+                        },
+                        subject='Permission revoked from %s!' % comp,
+                        html_file="emails/notifications/participation_revoked.html",
+                        text_file="emails/notifications/participation_revoked.txt",
+                        to_email=self.request.user.email
+                    )
+
+                if comp.creator.organizer_status_updates:
+                    self._send_mail(
+                        {
+                            'competition': comp,
+                            'participant': p
+                        },
+                        subject="%s's permission revoked from your competition!" % p.user,
+                        html_file="emails/notifications/organizer_participation_revoked.html",
+                        text_file="emails/notifications/organizer_participation_revoked.txt",
+                        to_email=comp.creator.email
+                    )
+
         except ObjectDoesNotExist as e:
             resp = {
                 'status' : 400
@@ -369,6 +501,8 @@ class CompetitionSubmissionViewSet(viewsets.ModelViewSet):
                 break
         if phase is None or phase.is_active is False:
             raise PermissionDenied(detail='Competition phase is closed.')
+        if phase.auto_migration and not phase.is_migrated:
+            raise PermissionDenied(detail="Failed, competition phase is being migrated, please try again in a few minutes")
         obj.phase = phase
 
         blob_name = self.request.DATA['id'] if 'id' in self.request.DATA else ''
@@ -486,9 +620,23 @@ class WorksheetsListApi(views.APIView):
     def get(self, request):
         user_id = self.request.user.id
         logger.debug("WorksheetsListApi: user_id=%s.", user_id)
-        service = BundleService()
+        service = BundleService(self.request.user)
         try:
             worksheets = service.worksheets()
+            user_ids = []
+            user_id_to_worksheets = {}
+            for worksheet in worksheets:
+                owner_id = worksheet['owner_id']
+                if owner_id in user_id_to_worksheets:
+                    user_id_to_worksheets[owner_id].append(worksheet)
+                else:
+                    user_id_to_worksheets[owner_id] = [worksheet]
+                    user_ids.append(owner_id)
+            if len(user_ids) > 0:
+                users = ClUser.objects.filter(id__in=user_ids)
+                for user in users:
+                    for worksheet in user_id_to_worksheets[user.id]:
+                        worksheet['owner'] = user.username
             return Response(worksheets)
         except Exception as e:
             return Response(status=service.http_status_from_exception(e))
@@ -505,7 +653,7 @@ class WorksheetsListApi(views.APIView):
         logger.debug("WorksheetCreation: owner=%s; name=%s", owner.id, worksheet_name)
         if len(worksheet_name) <= 0:
             return Response("Invalid name.", status=status.HTTP_400_BAD_REQUEST)
-        service = BundleService()
+        service = BundleService(self.request.user)
         try:
             data["uuid"] = service.create_worksheet(worksheet_name)
             logger.debug("WorksheetCreation def: owner=%s; name=%s; uuid", owner.id, data["uuid"])
@@ -520,9 +668,11 @@ class WorksheetContentApi(views.APIView):
     def get(self, request, uuid):
         user_id = self.request.user.id
         logger.debug("WorksheetContent: user_id=%s; uuid=%s.", user_id, uuid)
-        service = BundleService()
+        service = BundleService(self.request.user)
         try:
             worksheet = service.worksheet(uuid)
+            owner = ClUser.objects.filter(id=worksheet['owner_id'])[0]
+            worksheet['owner'] = owner.username
             return Response(worksheet)
         except Exception as e:
             return Response(status=service.http_status_from_exception(e))
@@ -534,7 +684,7 @@ class BundleInfoApi(views.APIView):
     def get(self, request, uuid):
         user_id = self.request.user.id
         logger.debug("BundleInfo: user_id=%s; uuid=%s.", user_id, uuid)
-        service = BundleService()
+        service = BundleService(self.request.user)
         try:
             item = service.item(uuid)
             return Response(item, content_type="application/json")
@@ -548,7 +698,7 @@ class BundleContentApi(views.APIView):
     def get(self, request, uuid, path):
         user_id = self.request.user.id
         logger.debug("BundleContent: user_id=%s; uuid=%s; path=%s.", user_id, uuid, path)
-        service = BundleService()
+        service = BundleService(self.request.user)
         try:
             items = service.ls(uuid, path)
             return Response(items)
@@ -569,7 +719,7 @@ class BundleFileContentApi(views.APIView):
 
     def get(self, request, uuid, path):
         user_id = self.request.user.id
-        service = BundleService()
+        service = BundleService(self.request.user)
         try:
             content_type = BundleFileContentApi._content_type(path)
             return StreamingHttpResponse(service.read_file(uuid, path), content_type=content_type)

@@ -2,11 +2,23 @@
 {% elif phase.is_future %}
     <p>This phase of the competition has not started yet. Please check back later.</p>
 {% else %}
+    {% if phase.competition.force_submission_to_leaderboard %}
+        <div id="forced_to_leaderboard"></div>
+    {% endif %}
+
     {% if phase.is_active %}
     <div class="row">
         <div class="panel">
-            <p>Click the Submit Results button to upload a new submission.</p>
-            <button id="fileUploadButton" class="button">Submit Results...</button>
+            <p>Click the Submit button to upload a new submission.</p>
+            <button
+                    id="fileUploadButton"
+                    class="button {% if not phase.reference_data %}disabled{% endif %}"
+                    {% if not phase.reference_data %}disabled="disabled"{% endif %}>Submit</button>
+
+            {% if not phase.reference_data %}
+                <br><i style="color: #a30000;">This phase doesn't have reference_data supplied yet, please add reference data before submissions may be uploaded!</i>
+            {% endif %}
+
             <p id="details" class="submission_upload_details"></p>
         </div>
         <div>
@@ -39,8 +51,8 @@
                 {% if submission_info_list|length_is:"0" %}
                 <tr class="noData">
                     <td class="tdDetails" colspan="6">No data available in table</td>
-                </tr>  
-                {% else %}  
+                </tr>
+                {% else %}
                 {% for submission_info in submission_info_list %}
                 <tr id="{{submission_info.id}}">
                     {% if submission_info.is_finished %}
@@ -65,5 +77,5 @@
         </table>
       </div>
     </div>
-    {% include "web/common/_submission_details_template.html" %} 
+    {% include "web/common/_submission_details_template.html" %}
 {% endif %}

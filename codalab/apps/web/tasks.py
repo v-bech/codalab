@@ -4,30 +4,39 @@ Defines background tasks needed by the web site.
 import io
 import json
 import logging
+import yaml
+
 from urllib import pathname2url
 from zipfile import ZipFile
 from django.conf import settings
 from django.core.files.base import ContentFile
+from django.core.mail import get_connection, EmailMultiAlternatives
 from django.db import transaction
+from django.template import Context
+from django.template.loader import render_to_string
+from django.contrib.sites.models import Site
 from apps.jobs.models import (Job,
                               run_job_task,
                               JobTaskResult,
                               getQueue)
 from apps.web.models import (add_submission_to_leaderboard,
+                             Competition,
                              CompetitionSubmission,
                              CompetitionDefBundle,
                              CompetitionSubmissionStatus,
                              submission_prediction_output_filename,
                              submission_output_filename,
+                             submission_private_output_filename,
                              submission_stdout_filename,
                              submission_stderr_filename,
+                             submission_history_file_name,
                              SubmissionScore,
                              SubmissionScoreDef)
 
 logger = logging.getLogger(__name__)
 
-# Echo
 
+# Echo
 def echo_task(job_id, args):
     """
     A simple task to echo a message provided as args['message']. The associated job will
@@ -134,6 +143,7 @@ def predict(submission, job_id):
     else:
         raise ValueError("Program is missing.")
     input_value = submission.phase.input_data.name
+
     if len(input_value) > 0:
         lines.append("input: %s" % input_value)
     lines.append("stdout: %s" % submission_stdout_filename(submission))
@@ -149,12 +159,17 @@ def predict(submission, job_id):
     submission.execution_key = json.dumps({'predict' : job_id})
     submission.save()
     # Submit the request to the computation service
-    body = json.dumps({"id" : job_id,
-                       "task_type": "run",
-                       "task_args": {
-                           "bundle_id" : submission.prediction_runfile.name,
-                           "container_name" : settings.BUNDLE_AZURE_CONTAINER,
-                           "reply_to" : settings.SBS_RESPONSE_QUEUE}})
+    body = json.dumps({
+        "id" : job_id,
+        "task_type": "run",
+        "task_args": {
+            "bundle_id" : submission.prediction_runfile.name,
+            "container_name" : settings.BUNDLE_AZURE_CONTAINER,
+            "reply_to" : settings.SBS_RESPONSE_QUEUE,
+            "execution_time_limit": submission.phase.execution_time_limit
+        }
+    })
+
     getQueue(settings.SBS_COMPUTE_QUEUE).send_message(body)
     # Update the submission object
     _set_submission_status(submission.id, CompetitionSubmissionStatus.SUBMITTED)
@@ -172,6 +187,34 @@ def score(submission, job_id):
         state = json.loads(submission.execution_key)
     has_generated_predictions = 'predict' in state
 
+    #generate metadata-only bundle describing the history of submissions and phases
+    last_submissions = CompetitionSubmission.objects.filter(
+        participant=submission.participant,
+        status__codename=CompetitionSubmissionStatus.FINISHED
+
+    ).order_by('-submitted_at')
+
+
+    lines = []
+    lines.append("description: history of all previous successful runs output files")
+
+    if last_submissions:
+        for past_submission in last_submissions:
+            if past_submission.pk != submission.pk:
+                #pad folder numbers for sorting os side, 001, 002, 003,... 010, etc...
+                past_submission_phasenumber = '%03d' % past_submission.phase.phasenumber
+                past_submission_number = '%03d' % past_submission.submission_number
+                lines.append('%s/%s/output/: %s' % (
+                        past_submission_phasenumber,
+                        past_submission_number,
+                        submission_private_output_filename(past_submission),
+                    )
+                )
+    else:
+        pass
+
+    submission.history_file.save('history.txt', ContentFile('\n'.join(lines)))
+
     # Generate metadata-only bundle describing the inputs. Reference data is an optional
     # dataset provided by the competition organizer. Results are provided by the participant
     # either indirectly (has_generated_predictions is True i.e. participant provides a program
@@ -185,7 +228,25 @@ def score(submission, job_id):
         lines.append("res: %s" % res_value)
     else:
         raise ValueError("Results are missing.")
+
+    lines.append("history: %s" % submission_history_file_name(submission))
+    lines.append("submitted-by: %s" % submission.participant.user.username)
+    lines.append("submitted-at: %s" % submission.submitted_at.replace(microsecond=0).isoformat())
+    lines.append("competition-submission: %s" % submission.submission_number)
+    lines.append("competition-phase: %s" % submission.phase.phasenumber)
+    is_automatic_submission = False
+    if submission.phase.auto_migration:
+        # If this phase has auto_migration and this submission is the first in the phase, it is an automatic submission!
+        submissions_this_phase = CompetitionSubmission.objects.filter(
+            phase=submission.phase,
+            participant=submission.participant
+        ).count()
+        is_automatic_submission = submissions_this_phase == 1
+
+    lines.append("automatic-submission: %s" % is_automatic_submission)
     submission.inputfile.save('input.txt', ContentFile('\n'.join(lines)))
+
+
     # Generate metadata-only bundle describing the computation.
     lines = []
     program_value = submission.phase.scoring_program.name
@@ -210,12 +271,16 @@ def score(submission, job_id):
     submission.execution_key = json.dumps(state)
     submission.save()
     # Submit the request to the computation service
-    body = json.dumps({"id" : job_id,
-                       "task_type": "run",
-                       "task_args": {
-                           "bundle_id" : submission.runfile.name,
-                           "container_name" : settings.BUNDLE_AZURE_CONTAINER,
-                           "reply_to" : settings.SBS_RESPONSE_QUEUE}})
+    body = json.dumps({
+        "id" : job_id,
+        "task_type": "run",
+        "task_args": {
+            "bundle_id" : submission.runfile.name,
+            "container_name" : settings.BUNDLE_AZURE_CONTAINER,
+            "reply_to" : settings.SBS_RESPONSE_QUEUE,
+            "execution_time_limit": submission.phase.execution_time_limit
+        }
+    })
     getQueue(settings.SBS_COMPUTE_QUEUE).send_message(body)
     if has_generated_predictions == False:
         _set_submission_status(submission.id, CompetitionSubmissionStatus.SUBMITTED)
@@ -257,6 +322,7 @@ def update_submission_task(job_id, args):
             if 'score' in state:
                 logger.debug("update_submission_task loading final scores (pk=%s)", submission.pk)
                 submission.output_file.name = pathname2url(submission_output_filename(submission))
+                submission.private_output_file.name = pathname2url(submission_private_output_filename(submission))
                 submission.save()
                 logger.debug("Retrieving output.zip and 'scores.txt' file (submission_id=%s)", submission.id)
                 ozip = ZipFile(io.BytesIO(submission.output_file.read()))
@@ -278,6 +344,11 @@ def update_submission_task(job_id, args):
                     logger.debug("Adding to leaderboard... (submission_id=%s)", submission.id)
                     add_submission_to_leaderboard(submission)
                     logger.debug("Leaderboard updated with latest submission (submission_id=%s)", submission.id)
+
+                if submission.phase.competition.force_submission_to_leaderboard:
+                    add_submission_to_leaderboard(submission)
+                    logger.debug("Force submission added submission to leaderboard (submission_id=%s)", submission.id)
+
                 result = Job.FINISHED
             else:
                 logger.debug("update_submission_task entering scoring phase (pk=%s)", submission.pk)
@@ -382,3 +453,45 @@ def evaluate_submission(submission_id, is_scoring_only):
     """
     task_args = {'submission_id': submission_id, 'predict': (not is_scoring_only)}
     return Job.objects.create_and_dispatch_job('evaluate_submission', task_args)
+
+
+def _send_mass_html_mail(datatuple, fail_silently=False, user=None, password=None,
+                        connection=None):
+    connection = connection or get_connection(
+        username=user, password=password, fail_silently=fail_silently
+    )
+
+    messages = []
+    for subject, text, html, from_email, recipient in datatuple:
+        message = EmailMultiAlternatives(subject, text, from_email, recipient)
+        message.attach_alternative(html, 'text/html')
+        messages.append(message)
+
+    return connection.send_messages(messages)
+
+
+def send_mass_email_task(job_id, task_args):
+    competition = Competition.objects.get(pk=task_args["competition_pk"])
+    body = task_args["body"]
+    subject = task_args["subject"]
+    from_email = task_args["from_email"]
+    to_emails = task_args["to_emails"]
+
+    context = Context({"competition": competition, "body": body, "site": Site.objects.get_current()})
+    text = render_to_string("emails/notifications/participation_organizer_direct_email.txt", context)
+    html = render_to_string("emails/notifications/participation_organizer_direct_email.html", context)
+
+    mail_tuples = ((subject, text, html, from_email, [e]) for e in to_emails)
+
+    _send_mass_html_mail(mail_tuples)
+
+
+def send_mass_email(competition, body=None, subject=None, from_email=None, to_emails=None):
+    task_args = {
+        "competition_pk": competition.pk,
+        "body": body,
+        "subject": subject,
+        "from_email": from_email,
+        "to_emails": to_emails
+    }
+    return Job.objects.create_and_dispatch_job('send_mass_email', task_args)
